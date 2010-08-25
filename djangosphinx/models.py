@@ -1,3 +1,4 @@
+import sys
 import select
 import socket
 import time
@@ -191,7 +192,8 @@ def to_sphinx(value):
     return int(value)
 
 class SphinxQuerySet(object):
-    available_kwargs = ('rankmode', 'mode', 'weights', 'maxmatches', 'passages', 'passages_opts')
+    available_kwargs = ('rankmode', 'mode', 'weights', 'maxmatches',
+                        'passages', 'passages_opts', 'limit')
     
     def __init__(self, model=None, using=None, **kwargs):
         self._select_related        = False
@@ -203,7 +205,7 @@ class SphinxQuerySet(object):
         self._query                 = ''
         self.__metadata             = None
         self._offset                = 0
-        self._limit                 = 20
+        self._limit                 = getattr(settings, 'SPHINX_LIMIT', 20)
 
         self._groupby               = None
         self._sort                  = None
@@ -229,6 +231,10 @@ class SphinxQuerySet(object):
             self._index             = kwargs.get('index', model._meta.db_table)
         else:
             self._index             = kwargs.get('index')
+            
+        if not self._limit:
+            self._limit = sys.maxint
+        self._maxmatches = self._limit < 1000 and 1000 or self._limit
 
     def __repr__(self):
         if self._result_cache is not None:
@@ -532,6 +538,20 @@ class SphinxQuerySet(object):
 
         if not results:
             if client.GetLastError():
+                # Setting max_matches according to searchd max_matches
+                if ('out of bounds (per-server max_matches='
+                in client.GetLastError()):
+                    max_matches = int(re.search(
+                                        r"max_matches=(\d+)\)",
+                                        client.GetLastError()).group(1))
+                    logging.warning(
+                        "Your max_matches value in sphinx.conf is %s but "
+                        "django-sphinx is using %s."
+                        % (max_matches, self._maxmatches))
+                    settings.SPHINX_LIMIT = max_matches
+                    self._limit = max_matches
+                    self._maxmatches = max_matches
+                    return self._get_sphinx_results()
                 raise SearchError, client.GetLastError()
             elif client.GetLastWarning():
                 raise SearchError, client.GetLastWarning()
